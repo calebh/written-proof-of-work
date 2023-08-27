@@ -111,6 +111,14 @@ function base64ToArrayBuffer(base64) {
   return bytes.buffer;
 }
 
+function hexToBytes(hex) {
+  let bytes = new Uint8Array(hex.length / 2);
+  for (let c = 0, i = 0; c < hex.length; c += 2, i += 1) {
+    bytes[i] = parseInt(hex.substr(c, 2), 16);
+  }
+  return bytes;
+}
+
 // TODO: Figure out a way to work around CORs issue
 // At the moment there are no timestamp servers that allow
 // cross origin connections
@@ -123,6 +131,7 @@ const tsa_cert = (() => {
   return new pkijs.Certificate({ schema: asn1.result })
 })();
 
+// Verifies that a timestamp response is correct for a given encoded string
 var verifyTimestampRsp = async (encodedStr, timestampRsp) => {
   // Verify that the timestamp is okay
   var verificationParams = {
@@ -142,12 +151,85 @@ var verifyTimestampRsp = async (encodedStr, timestampRsp) => {
   return okay;
 };
 
+// Given an input history, this function verifies all cryptographic timestamps
+// and validates temporal monoticity
+var verifyEntireHistory = async (history) => {
+  if (history.length > 0) {
+    // Check #1: Last element of history must be a timestamp
+    if (history[history.length - 1].type !== "timestamp") {
+      return false;
+    }
+    // Check #2: Each timestamp must be valid, encoding the previous history
+    // and being correctly signed by the TSA
+    var startIdx = 0;
+    for (var currIdx = 0; currIdx < history.length; currIdx += 1) {
+      if (history[currIdx].type === "timestamp") {
+        var subHistory = history.slice(startIdx, currIdx);
+        var subHistoryStr = stringify(subHistory);
+        var encodedSubHistory = encodeStr(subHistoryStr);
+        var tspRsp = pkijs.TimeStampResp.fromBER(hexToBytes(history[currIdx].timestamp));
+
+        var okay = await verifyTimestampRsp(encodedSubHistory, tspRsp);
+        if (!okay) {
+          return false;
+        }
+
+        startIdx = currIdx;
+      }
+    }
+    // Check #3: The times attached to the deltas/documents must be monotonically
+    // increasing
+    var lastTime = null;
+    for (var i = 0; i < history.length; i += 1) {
+      if (history[i].type === "delta" || history[i].type === "document") {
+        var currTime = history[i].time;
+        if (lastTime !== null) {
+          if (lastTime > currTime) {
+            return false;
+          }
+        }
+        lastTime = currTime;
+      }
+    }
+    // Check #4: All document -> timestamp -> delta sequences must
+    // be monotonically increasing within a 10 second margin of error
+    for (var currIdx = 0; i < history.length; currIdx += 1) {
+      if (history[currIdx].type === "timestamp") {
+        var prevTime = history[currIdx - 1].time;
+        var prevTimeSlacked = new Date(prevTime - (10 * 1000));
+
+        var tspRsp = pkijs.TimeStampResp.fromBER(hexToBytes(history[currIdx].timestamp));
+        var signedData = new pkijs.SignedData({schema: tspRsp.timeStampToken.content});
+        var tstInfo = pkijs.TSTInfo.fromBER(signedData.encapContentInfo.eContent.valueBlock.valueHexView);
+        
+        var tokenTime = tstInfo.genTime;
+
+        if (prevTimeSlacked > tokenTime) {
+          return false;
+        }
+
+        if ((currIdx + 1) < history.length) {
+          var nextTime = history[currIdx + 1].time;
+          var nextTimeSlacked = new Date(nextTime + (10 * 1000));
+          if (tokenTime > nextTimeSlacked) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+};
+
+var getCurrentContents = () => quill.getContents();
+
 var doTimestamp = async () => {
   if (history.length > 0) {
     // Check if there has been a delta since we last committed
     if (history[history.length - 1].type === "delta") {
       // Add the entire contents of the document to the history
-      addToHistory({type: "document", time: Date.now(), contents: quill.getContents()});
+      addToHistory({type: "document", time: Date.now(), contents: getCurrentContents()});
 
       lockHistory();
 
@@ -173,8 +255,6 @@ var doTimestamp = async () => {
 
       var data = await (await fetchRsp.blob()).arrayBuffer();
       var tspRsp = pkijs.TimeStampResp.fromBER(data);
-      // data from the response can be extracted like this:
-      // var signedData = new pkijs.SignedData({schema: tspRsp.timeStampToken.content});
       var okay = await verifyTimestampRsp(encodedStr, tspRsp);
 
       if (okay) {
@@ -200,6 +280,66 @@ document.getElementById('export-history-button').onclick = async () => {
     var blob = new Blob([stringify(history)], {type: "text/plain;charset=utf-8"});
     FileSaver.saveAs(blob, "demo-document.json");
   } else {
-    alert("Failed to timestamp document with Sectigo TSA. This is typically caused by CORS restrictions being enabled in your browser settings, but it could also occur if the TSA is down.");
+    alert("Failed to timestamp document with Sectigo Timestamp Authority (TSA). This is typically caused by CORS restrictions being enabled in your browser settings, but it could also occur if the TSA is down or otherwise unreachable.");
   }
 };
+
+let isObject = (value) => value !== null && typeof value === 'object';
+let isString = (value) => typeof value === 'string' || value instanceof String;
+let isNumber = (value) => !isNaN(value) && typeof value === 'number';
+
+var validateSchema = (history) => {
+  if (Array.isArray(history)) {
+    var prevType = null;
+    for (var i = 0; i < history.length; i += 1) {
+      var entry = history[i];
+      if (isObject(entry) && entry.hasOwnProperty("type")) {
+        if (entry.type === "timestamp") {
+          if (!(entry.hasOwnProperty("timestamp") && isString(entry.timestamp) && prevType === "document")) {
+            return false;
+          }
+        } else if (entry.type === "delta") {
+          if (!(entry.hasOwnProperty("time") && isNumber(entry.time) && entry.hasOwnProperty('delta'))) {
+            return false;
+          }
+        } else if (entry.type === "document") {
+          if (!(entry.hasOwnProperty("time") && isNumber(entry.time) && entry.hasOwnProperty("contents"))) {
+            return false;
+          }
+        }
+        prevType = entry.type;
+      } else {
+        return false;
+      }
+    }
+
+    return true;
+  } else {
+    return false;
+  }
+}
+
+document.getElementById('verify-file-chooser').addEventListener('change', function() {
+  var fr = new FileReader();
+  fr.onload = async () => {
+    try {
+      var parsedHistory = JSON.parse(fr.result);
+      if (validateSchema(parsedHistory)) {
+        var okay = await verifyEntireHistory(parsedHistory);
+        if (okay) {
+          alert("Your edit history passed the verification check!");
+        } else {
+          alert("Your edit history failed the verification check!");
+        }
+      } else {
+        alert("Input file did not have a valid schema.");
+      }
+    } catch (e) {
+      console.log(e);
+      alert("Input file was not valid JSON.");
+    }
+  };
+  if (this.files.length > 0) {
+    fr.readAsText(this.files[0]);
+  }
+});
