@@ -1,0 +1,30 @@
+{
+  "devDependencies": {
+    "@babel/core": "^7.22.10",
+    "@babel/preset-env": "^7.22.10",
+    "babel-loader": "^9.1.3",
+    "webpack": "^5.88.2",
+    "webpack-cli": "^5.1.4"
+  },
+  "name": "wpow",
+  "version": "1.0.0",
+  "description": "A web based demonstration of Written Proof of Work",
+  "private": true,
+  "dependencies": {
+    "asn1js": "^3.0.5",
+    "css-loader": "^6.8.1",
+    "file-saver": "^2.0.5",
+    "json-stringify-deterministic": "^1.0.10",
+    "pkijs": "^3.0.15",
+    "quill": "^1.3.7",
+    "style-loader": "^3.3.3",
+    "svg-inline-loader": "^0.8.2",
+    "ts-loader": "^9.4.4",
+    "typescript": "^5.1.6"
+  },
+  "scripts": {
+    "build": "npx webpack --config webpack.conf.js"
+  },
+  "author": "Caleb Helbling",
+  "license": "MIT"
+}
